@@ -8,11 +8,12 @@ import re
 import time
 import wave
 from contextlib import closing
-from http.client import HTTPSConnection
 from urllib.parse import urlsplit
 
+import httpx
 
 from ..ai_config import env_flag
+from ..behavior.performance import mark
 
 logger = logging.getLogger(__name__)
 SAMPLE_RATE = 24000
@@ -33,6 +34,7 @@ class SpeakerTTS:
         if cancel.is_set():
             return False
         started = time.monotonic()
+        mark("tts_requested")
         audio = self._synthesize(text, cancel)
         logger.info("interaction=%s tts_synthesis_seconds=%.3f", interaction_id,
                     time.monotonic() - started)
@@ -41,23 +43,31 @@ class SpeakerTTS:
         if not audio or len(audio) % 2:
             raise ValueError("TTS returned invalid PCM audio")
 
+        mark("tts_first_pcm")
         import sounddevice as sd
         started = time.monotonic()
         try:
             with sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                                     device=self.device, blocksize=480, latency="low") as stream:
+                first_output = time.monotonic()
                 for start in range(0, len(audio), 960):
                     if cancel.is_set():
                         stream.abort()
                         return False
                     stream.write(audio[start:start + 960])
+                    if start == 0:
+                        mark("tts_first_output", first_output)
                 if cancel.is_set():
                     stream.abort()
                     return False
+            mark("tts_playback_completed")
             return True
         finally:
             logger.info("interaction=%s tts_playback_seconds=%.3f", interaction_id,
                         time.monotonic() - started)
+
+    def close(self):
+        self.client.close()
 
 
 class OpenAITTS(SpeakerTTS):
@@ -72,23 +82,25 @@ class OpenAITTS(SpeakerTTS):
         return response.content
 
 
-def _download_dashscope_wav(url, timeout):
-    """Fetch Alibaba's signed result over TLS without logging its query or sending the API key."""
+def _download_dashscope_wav(transport, url, timeout):
+    """Fetch Alibaba's signed result over TLS without forwarding synthesis credentials."""
     target = urlsplit(url)
     host = target.hostname
     if (target.scheme not in ("http", "https") or not host or not host.endswith(".aliyuncs.com")
             or target.username is not None or target.port not in (None, 443) or not target.path):
         raise ValueError("DashScope returned an invalid audio URL")
-    path = target.path + ("?" + target.query if target.query else "")
-    with closing(HTTPSConnection(host, timeout=timeout)) as connection:
-        connection.request("GET", path)
-        response = connection.getresponse()
-        if response.status != 200:
-            logger.warning("DashScope TTS audio download HTTP %s", response.status)
+    wav = bytearray()
+    request = httpx.Request("GET", target._replace(scheme="https").geturl(),
+                            extensions={"timeout": httpx.Timeout(timeout).as_dict()})
+    # Use the pooled transport directly to keep the signed URL out of httpx INFO logs.
+    with closing(transport.handle_request(request)) as response:
+        if response.status_code != 200:
+            logger.warning("DashScope TTS audio download HTTP %s", response.status_code)
             raise RuntimeError("DashScope TTS audio download failed")
-        wav = response.read(MAX_WAV_BYTES + 1)
-    if len(wav) > MAX_WAV_BYTES:
-        raise ValueError("DashScope audio file exceeds the playback size limit")
+        for chunk in response.iter_bytes(chunk_size=64 * 1024):
+            if len(wav) + len(chunk) > MAX_WAV_BYTES:
+                raise ValueError("DashScope audio file exceeds the playback size limit")
+            wav.extend(chunk)
     return wav
 
 
@@ -96,10 +108,19 @@ class DashScopeTTS(SpeakerTTS):
     """DashScope's non-streaming Qwen-Audio-TTS HTTP interface."""
 
     def __init__(self, client, endpoint, key, model, voice, timeout, device=None,
-                 download=_download_dashscope_wav):
+                 download=None):
         self.client, self.endpoint, self.key = client, endpoint, key
         self.model, self.voice, self.timeout, self.device = model, voice, timeout, device
         self.download = download
+        self.download_transport = None if download else httpx.HTTPTransport(
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4))
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            if self.download_transport is not None:
+                self.download_transport.close()
 
     def _synthesize(self, text, cancel):
         response = self.client.post(
@@ -129,7 +150,9 @@ class DashScopeTTS(SpeakerTTS):
             raise ValueError("DashScope TTS returned no audio URL") from None
         if not isinstance(url, str) or not url:
             raise ValueError("DashScope TTS returned no audio URL")
-        with wave.open(io.BytesIO(self.download(url, self.timeout)), "rb") as wav:
+        data = (self.download(url, self.timeout) if self.download else
+                _download_dashscope_wav(self.download_transport, url, self.timeout))
+        with wave.open(io.BytesIO(data), "rb") as wav:
             if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, SAMPLE_RATE):
                 raise ValueError("DashScope returned audio outside the requested 24 kHz mono PCM16 format")
             return wav.readframes(wav.getnframes())
@@ -154,13 +177,11 @@ def tts_from_env():
         raise ValueError("TTS_TIMEOUT must be positive and finite")
     device = int(device) if device else None
     if provider == "dashscope":
-        import httpx
-
         base = url.rstrip("/")
         parts = urlsplit(base)
         if parts.scheme != "https" or not parts.hostname or parts.path != "/api/v1" or parts.query or parts.fragment:
             raise ValueError("DashScope TTS_BASE_URL must be an HTTPS DashScope base ending in /api/v1")
-        return DashScopeTTS(httpx, base + "/services/audio/tts/SpeechSynthesizer",
+        return DashScopeTTS(httpx.Client(), base + "/services/audio/tts/SpeechSynthesizer",
                             key, model, voice, timeout, device)
     from openai import OpenAI
 

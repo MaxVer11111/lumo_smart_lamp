@@ -45,6 +45,10 @@ class CommandDispatcher:
             self.manager.discard(ticket)
             return None, DispatchResult("unsupported", str(exc))
 
+        finally:
+            ticket.trace.mark("validation_finished")
+
+        ticket.trace.mark("validated")
         if event.intent == "stop":
             return event, self.manager.submit(ticket, (), stop=True)
         if event.intent == "emotion_expression":

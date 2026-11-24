@@ -17,12 +17,15 @@ dependencies = [
     "python-dotenv",
     "openai>=1.99.9,<3",
     "sounddevice>=0.5.2",
+    "httpx>=0.28,<1",
+    "websockets>=15,<16",
 ]
 
 [tool.uv.sources]
 lerobot = { git = "https://github.com/huggingface/lerobot" }
 
 [project.optional-dependencies]
+vad = ["webrtcvad-wheels>=2.0.14,<3"]
 hardware = [
     "adafruit-circuitpython-neopixel",
     "rpi-ws281x",

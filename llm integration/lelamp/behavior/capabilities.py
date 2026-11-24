@@ -51,14 +51,14 @@ class MotionCapability:
 
 class CapabilityRegistry:
     def __init__(self, *, simulated, motion=False, profile=None, scale=0.25,
-                 lighting=None, tts_mode=None):
+                 lighting=None, tts_mode=None, recording_cache=None):
         if simulated and motion:
             raise ValueError("Physical motion cannot use a simulated capability registry")
         self.simulated = simulated
         self.lighting = lighting
         self.tts_mode = tts_mode
         recordings = set(available_recordings(AI_MOTION_DIR))
-        approvals = self._approvals(profile) if motion else {}
+        approvals = self.motion_approvals(profile) if motion else {}
         self.motions = {}
         for name, description in MOTION_DESCRIPTIONS.items():
             recording = VOICE_RECORDINGS.get(name, name)
@@ -74,7 +74,7 @@ class CapabilityRegistry:
                 if scale > max_scale:
                     raise ValueError(f"Requested scale exceeds the locally verified scale for {name}")
                 recording_trajectory(profile, profile.neutral, recording, scale, expected_sha256=digest,
-                                     recordings_dir=AI_MOTION_DIR)
+                                     recordings_dir=AI_MOTION_DIR, cache=recording_cache)
             self.motions[name] = MotionCapability(
                 name, description, filename, exists and (simulated or bool(approval)),
                 bool(approval), autonomous, recording_sha256=approval[0] if approval else None)
@@ -82,7 +82,7 @@ class CapabilityRegistry:
             raise ValueError("Profile requires at least one locally verified ai_motion action")
 
     @staticmethod
-    def _approvals(profile):
+    def motion_approvals(profile):
         if profile is None:
             raise ValueError("Physical motion requires a MotionProfile")
         config = profile.data.get("ai_motion", {})

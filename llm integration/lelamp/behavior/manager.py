@@ -10,7 +10,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+from .performance import Trace, current_trace
+
 logger = logging.getLogger(__name__)
+
+
+def _trace_lane(lane):
+    return "tts" if lane == "audio" else lane
 
 
 class Priority(IntEnum):
@@ -24,6 +30,8 @@ class Priority(IntEnum):
 class Interaction:
     id: str
     expires: float
+    cancel: threading.Event = field(default_factory=threading.Event, compare=False)
+    trace: Trace = field(default_factory=Trace, compare=False)
 
 
 @dataclass(frozen=True)
@@ -75,6 +83,8 @@ class BehaviorManager:
 
     def begin_interaction(self):
         with self._condition:
+            if self._latest is not None:
+                self._latest.cancel.set()
             ticket = Interaction(uuid.uuid4().hex[:12], self._clock() + self._ttl)
             self._latest = ticket if not self._stopped and not self._closed else None
             self._used = False
@@ -125,7 +135,7 @@ class BehaviorManager:
 
     def _accepts(self, ticket):
         return (not self._closed and not self._stopped and ticket is self._latest
-                and not self._used and self._clock() < ticket.expires)
+                and not self._used and not ticket.cancel.is_set() and self._clock() < ticket.expires)
 
     def accepts(self, ticket):
         with self._condition:
@@ -135,6 +145,7 @@ class BehaviorManager:
         with self._condition:
             if self._accepts(ticket):
                 self._used = True
+                ticket.cancel.set()
 
     def submit(self, ticket, jobs, *, stop=False):
         dropped = []
@@ -145,33 +156,48 @@ class BehaviorManager:
                 return DispatchResult("rejected", "Interaction is stale, expired or already dispatched")
             self._used = True
             if stop:
+                ticket.trace.mark("dispatched")
                 dropped = self._stop_locked()
                 result = DispatchResult("success", "P0 stop requested")
             else:
+                queues = self._pending.copy()
+                accepted = []
                 for job in jobs:
                     if not self._ready(job.lane):
                         return DispatchResult("unsupported", f"{job.lane} unavailable")
-                    if sum(p.priority <= job.priority for p in self._pending[job.lane]) >= self._queue_size:
-                        if job.lane != "audio":
-                            return DispatchResult("rejected", f"{job.lane} queue is full")
-                accepted = []
-                for job in jobs:
-                    queue = self._pending[job.lane]
-                    if sum(p.priority <= job.priority for p in queue) >= self._queue_size:
-                        continue  # Terminal speech was already delivered independently.
-                    if active := self._active.get(job.lane):
-                        if active.priority > job.priority:
-                            self._cancel_active(active)
-                    obsolete = [p for p in queue if p.priority > job.priority]
-                    dropped.extend(obsolete)
-                    self._pending[job.lane] = deque(p for p in queue if p.priority <= job.priority)
-                    self._pending[job.lane].append(job)
+                    now = self._clock()
+                    queue = queues[job.lane]
+                    retained = deque(task for task in queue if task.ticket.expires > now
+                                     and not self._supersedes(job, task))
+                    if len(retained) >= self._queue_size:
+                        if job.lane == "audio":
+                            ticket.trace.increment("tts_queue_skipped")
+                            continue
+                        return DispatchResult("rejected", f"{job.lane} queue is full")
+                    dropped.extend(task for task in queue if task not in retained)
+                    retained.append(job)
+                    queues[job.lane] = retained
                     accepted.append(job)
+                self._pending = queues
+                ticket.trace.mark("dispatched")
+                for job in accepted:
+                    ticket.trace.mark(f"{_trace_lane(job.lane)}_submitted")
+                    if active := self._active.get(job.lane):
+                        if active.priority > job.priority or (
+                                job.lane == "audio" and self._supersedes(job, active)):
+                            self._cancel_active(active)
                 self._condition.notify_all()
                 result = DispatchResult("accepted" if accepted else "success",
                                         jobs=tuple(job.result for job in accepted))
         self._finish_dropped(dropped)
         return result
+
+    @staticmethod
+    def _supersedes(job, queued):
+        return (queued.priority > job.priority or
+                (queued.ticket is not job.ticket and queued.priority == job.priority
+                 and (job.lane == "audio" or
+                      (job.lane == "motion" and job.priority == Priority.P2))))
 
     def local_stop(self):
         with self._condition:
@@ -188,6 +214,8 @@ class BehaviorManager:
             return True
 
     def _stop_locked(self):
+        if self._latest is not None:
+            self._latest.cancel.set()
         self._latest = None
         self._used = True
         for active in self._active.values():
@@ -199,6 +227,8 @@ class BehaviorManager:
         return dropped
 
     def _cancel_active(self, job):
+        if job.cancel.is_set():
+            return
         if job.lane == "motion":
             self._motion.stop(job.cancel)
         else:
@@ -211,6 +241,7 @@ class BehaviorManager:
 
     @staticmethod
     def _finish(job, status, detail=""):
+        job.ticket.trace.mark(f"{_trace_lane(job.lane)}_finished")
         logger.info("interaction=%s %s=%s priority=%s status=%s %s", job.ticket.id, job.lane,
                     job.label, job.priority.name, status, detail)
         try:
@@ -234,10 +265,12 @@ class BehaviorManager:
             started = self._clock()
             dropped = []
             detail = ""
+            trace_context = current_trace.set(job.ticket.trace)
             try:
                 if job.cancel.is_set() or started >= job.ticket.expires:
                     status, detail = "cancelled", "stopped or expired before execution"
                 else:
+                    job.ticket.trace.mark(f"{_trace_lane(lane)}_started")
                     completed = job.run(job.cancel)
                     status = "success" if completed is not False and not job.cancel.is_set() else "cancelled"
             except Exception as exc:
@@ -250,6 +283,7 @@ class BehaviorManager:
                         dropped = list(self._pending[lane])
                         self._pending[lane].clear()
             finally:
+                current_trace.reset(trace_context)
                 with self._condition:
                     del self._active[lane]
                     self._condition.notify_all()

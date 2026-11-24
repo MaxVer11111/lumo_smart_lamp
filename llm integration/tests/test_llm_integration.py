@@ -538,6 +538,11 @@ class RuntimeTests(Harness):
         self.assertEqual(tts.device, 3)
 
         def synthesize(request):
+            if request.method == "GET":
+                self.assertEqual(str(request.url),
+                                 "https://example.oss-cn-beijing.aliyuncs.com/result.wav?signature=test")
+                self.assertNotIn("authorization", request.headers)
+                return httpx.Response(200, content=wav_bytes.getvalue())
             self.assertEqual(request.method, "POST")
             self.assertEqual(request.url.path, "/api/v1/services/audio/tts/SpeechSynthesizer")
             self.assertEqual(request.headers["authorization"], "Bearer test-key")
@@ -549,20 +554,14 @@ class RuntimeTests(Harness):
                 "url": "http://example.oss-cn-beijing.aliyuncs.com/result.wav?signature=test",
             }}})
 
-        speaker, connection_class = MagicMock(), Mock()
-        connection = connection_class.return_value
-        connection.getresponse.return_value.status = 200
-        connection.getresponse.return_value.read.return_value = wav_bytes.getvalue()
+        speaker = MagicMock()
         transport = httpx.MockTransport(synthesize)
-        with httpx.Client(transport=transport) as client, \
-             patch.dict("sys.modules", {"sounddevice": speaker}), \
-             patch("lelamp.audio.tts.HTTPSConnection", connection_class):
+        tts.close()
+        with httpx.Client(transport=transport) as client, patch.dict("sys.modules", {"sounddevice": speaker}):
             tts.client = client
+            tts.download_transport = transport
             self.assertTrue(tts.speak("Hello", threading.Event(), "test"))
 
-        connection_class.assert_called_once_with("example.oss-cn-beijing.aliyuncs.com", timeout=8)
-        connection.request.assert_called_once_with("GET", "/result.wav?signature=test")
-        connection.close.assert_called_once()
         speaker.RawOutputStream.assert_called_once_with(
             samplerate=24000, channels=1, dtype="int16", device=3, blocksize=480, latency="low")
         speaker.RawOutputStream.return_value.__enter__.return_value.write.assert_called_once_with(pcm)
@@ -595,7 +594,7 @@ class RuntimeTests(Harness):
              patch("lelamp.ai_runtime.LLMClient.from_env") as llm, \
              patch("lelamp.ai_runtime.BailianASR") as asr, \
              patch("lelamp.ai_runtime.tts_from_env", return_value=None), \
-             patch("lelamp.ai_runtime.env_flag", return_value=True), \
+             patch("lelamp.ai_runtime.env_flag", side_effect=lambda name: name == "LIGHTING_ENABLED"), \
              patch.dict("sys.modules", {"sounddevice": sounddevice}), \
              patch("builtins.input", side_effect=["", "q", "What is gravity?", "/quit"]), \
              redirect_stdout(io.StringIO()) as output:

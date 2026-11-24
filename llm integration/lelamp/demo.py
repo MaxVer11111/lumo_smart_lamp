@@ -95,6 +95,17 @@ def parser():
     p.add_argument("--dry-run", action="store_true", help="Never connect to motors")
     p.add_argument("--enable-motion", action="store_true", help="Allow locally verified physical motion in ai mode")
     p.add_argument("--debug-ai", action="store_true", help="Include transcripts and raw events in AI debug logs")
+    for flag, description in (
+        ("vad", "End recording after local voice activity detection"),
+        ("streaming-asr", "Send PCM to Qwen ASR as it is captured"),
+        ("streaming-tts", "Play Qwen TTS PCM as it arrives"),
+        ("reuse-audio", "Reuse stopped input and streaming output device handles"),
+        ("motion-cache", "Cache validated recording data for authorized physical motion"),
+    ):
+        p.add_argument(f"--{flag}", action=argparse.BooleanOptionalAction, help=description)
+    p.add_argument("--benchmark", action="store_true", help="Collect per-interaction latency statistics")
+    p.add_argument("--benchmark-output", help="Append benchmark interactions as JSONL")
+    p.add_argument("--benchmark-label", help="Label used to group benchmark runs")
     p.add_argument("--export", help="Export preview trajectory CSV (play --dry-run)")
     return p
 
@@ -107,11 +118,15 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     from dotenv import load_dotenv
     load_dotenv(override=False)
+    if not args.benchmark and (args.benchmark_output or args.benchmark_label):
+        p.error("--benchmark-output and --benchmark-label require --benchmark")
     if args.mode in ("chat", "ai"):
         from .ai_runtime import run_cli
         return run_cli(args, p, connect_robot)
-    if args.enable_motion or args.debug_ai:
-        p.error("--enable-motion and --debug-ai are AI-mode options")
+    if (args.enable_motion or args.debug_ai or args.benchmark
+            or any(option is not None for option in (args.vad, args.streaming_asr, args.streaming_tts,
+                                                    args.reuse_audio, args.motion_cache))):
+        p.error("AI pipeline options require chat or ai mode")
     args.source = args.source or ("recording" if args.mode in ("voice", "commands") else "generated")
     if args.mode == "commands":
         for phrase, action in voice_commands(args.source).items():
@@ -140,7 +155,7 @@ def main(argv=None):
         p.error("jog requires --joint and --delta")
     if not 0 < args.duration <= 30:
         p.error("--duration must be between 0 and 30 seconds")
-    robot = None
+    robot = asr = None
     player = None
     previous_sigint = None
     try:
@@ -246,6 +261,11 @@ def main(argv=None):
                     robot.disconnect()
             else:
                 robot.bus.disconnect(disable_torque=False)
+        if asr:
+            try:
+                asr.client.close()
+            except Exception as exc:
+                logger.warning("ASR cleanup failed (%s)", type(exc).__name__)
 
 
 if __name__ == "__main__":

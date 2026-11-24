@@ -106,10 +106,11 @@ def export_csv(path, frames, fps=30):
 class DemoPlayer:
     """Synchronous single-writer player. stop() may be called from another thread."""
 
-    def __init__(self, robot, profile, fps=30):
+    def __init__(self, robot, profile, fps=30, *, recording_cache=None):
         if not isinstance(fps, int) or fps <= 0:
             raise ValueError("fps must be a positive integer")
         self.robot, self.profile, self.fps = robot, profile, fps
+        self.recording_cache = recording_cache
         self._lock = threading.Lock()
         self._cancel = threading.Event()
 
@@ -135,22 +136,28 @@ class DemoPlayer:
                 raise ValueError("Profile belongs to a different lamp")
             if calibration_digest(self.robot.calibration) != self.profile.data["calibration_sha256"]:
                 raise ValueError("Calibration changed; validate the motion profile again")
+            from .behavior.performance import mark
+
             observation = self.robot.get_observation()
             start = {joint: observation[joint] for joint in JOINTS}
+            mark("trajectory_started")
             if source == "recording":
                 from .demo_recordings import recording_trajectory
                 frames, _ = recording_trajectory(
                     self.profile, start, name, scale, self.fps, expected_sha256=recording_sha256,
-                    recordings_dir=recordings_dir)
+                    recordings_dir=recordings_dir, cache=self.recording_cache)
             elif source == "generated":
                 frames = self.profile.trajectory(start, name, self.fps, targets=targets)
             else:
                 raise ValueError(f"Unknown motion source: {source}")
-            for pose in frames:
+            mark("motion_prepared")
+            for index, pose in enumerate(frames):
                 if cancel.is_set():
                     return False
                 tick = time.monotonic()
                 self.robot.send_action(pose)
+                if index == 0:
+                    mark("motion_first_command", tick)
                 if cancel.wait(max(0, 1 / self.fps - (time.monotonic() - tick))):
                     return False
             return True

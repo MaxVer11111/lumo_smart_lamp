@@ -49,13 +49,9 @@ def record_audio(device=None, duration=4.0):
     except BaseException:
         sd.stop()
         raise
-    output = io.BytesIO()
-    with wave.open(output, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(16000)
-        wav.writeframes(audio.tobytes())
-    return output.getvalue()
+    from .audio.capture import pcm_wav
+
+    return pcm_wav(audio.tobytes())
 
 
 class ASRServiceError(RuntimeError):

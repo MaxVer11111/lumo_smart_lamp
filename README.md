@@ -260,12 +260,17 @@ Configure the independent LLM and Bailian ASR settings in `.env` using
 ```bash
 uv run -m lelamp.demo chat --dry-run
 uv run -m lelamp.demo ai --dry-run --device 0
+uv run --extra vad -m lelamp.demo ai --dry-run --device 0 \
+  --vad --streaming-asr --streaming-tts
 ```
 
 Each turn sends the current input and available capabilities to an
 OpenAI-compatible model. The demo validates and schedules its response locally.
 See the [LLM integration guide](llm%20integration/docs/llm_integration.md) for
 physical motion authorization, local stop controls, TTS, and live model evaluation.
+The [low-latency guide](llm%20integration/docs/low_latency_optimization.md) covers voice endpointing,
+streaming settings, and device reuse. The [benchmark guide](llm%20integration/docs/performance_benchmark.md)
+includes A/B commands, timing definitions, and measured trajectory preparation results.
 
 ### LiveKit Voice Agent
 
