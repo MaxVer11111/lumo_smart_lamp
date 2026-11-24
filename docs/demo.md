@@ -1,5 +1,7 @@
 # 三个动作与英文口令演示
 
+自然语言对话和动作控制见 [LUMO LLM 集成指南](../llm%20integration/docs/llm_integration.md)。
+
 本入口独立于 `main.py`，启动时不会自动播放 wake_up，不依赖 LiveKit、RGB 或扬声器。
 请先完成校准，再开启舵机运动。未校准时可以列出动作、检查麦克风和做语音预演。
 

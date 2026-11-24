@@ -252,6 +252,21 @@ Note: Boot time might vary with each run and extended usage (>1 hour) can burn t
 
 Sample apps to test LeLamp's capabilities.
 
+### LUMO LLM Demo
+
+Configure the independent LLM and Bailian ASR settings in `.env` using
+[`.env.example`](llm%20integration/.env.example). Run from the repository root.
+
+```bash
+uv run -m lelamp.demo chat --dry-run
+uv run -m lelamp.demo ai --dry-run --device 0
+```
+
+Each turn sends the current input and available capabilities to an
+OpenAI-compatible model. The demo validates and schedules its response locally.
+See the [LLM integration guide](llm%20integration/docs/llm_integration.md) for
+physical motion authorization, local stop controls, TTS, and live model evaluation.
+
 ### LiveKit Voice Agent
 
 To run a conversational agent on LeLamp, create a .env file with the following content in the root of this directory in your Raspberry Pi.
