@@ -22,7 +22,7 @@ def calibrate_follower(lamp_id: str, port: str) -> None:
     
     try:
         # Connect and calibrate
-        follower.connect(calibrate=False)
+        follower.connect(calibrate=False, calibration_only=True)
         follower.calibrate()
         logger.info("Follower calibration completed successfully")
     except Exception as e:

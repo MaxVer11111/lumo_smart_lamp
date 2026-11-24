@@ -94,6 +94,10 @@ The runtime includes several key dependencies:
 
 ## Core Functionality
 
+For the calibrated three-action demo and Bailian English voice commands, follow
+[the step-by-step demo guide](docs/demo.md). Start with follower calibration;
+the demo provides motor-free previews before enabling motion.
+
 Prior to following the instructions here, you should have an overview of how to control LeLamp through [this tutorial](https://github.com/humancomputerlab/LeLamp/blob/master/docs/5.%20LeLamp%20Control.md).
 
 ### 1. Motor Setup and Calibration

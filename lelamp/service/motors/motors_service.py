@@ -17,16 +17,21 @@ class MotorsService(ServiceBase):
         self.recordings_dir = os.path.join(os.path.dirname(__file__), "..", "..", "recordings")
     
     def start(self):
-        super().start()
+        if self.is_running:
+            return
         self.robot = LeLampFollower(self.robot_config)
         self.robot.connect(calibrate=False)
+        super().start()
         self.logger.info(f"Motors service connected to {self.port}")
 
     def stop(self, timeout: float = 5.0):
+        super().stop(timeout)
+        # Playback observes _stop_event each frame before disconnecting.
+        if self._worker_thread and self._worker_thread.is_alive():
+            raise RuntimeError("Motor worker has not stopped; refusing to close its serial port")
         if self.robot:
             self.robot.disconnect()
             self.robot = None
-        super().stop(timeout)
     
     def handle_event(self, event_type: str, payload: Any):
         if event_type == "play":
@@ -55,6 +60,8 @@ class MotorsService(ServiceBase):
             self.logger.info(f"Playing {len(actions)} actions from {recording_name}")
             
             for row in actions:
+                if self._stop_event.is_set():
+                    break
                 t0 = time.perf_counter()
                 
                 # Extract action data (exclude timestamp column)
@@ -64,7 +71,7 @@ class MotorsService(ServiceBase):
                 # Use time.sleep instead of busy_wait to avoid blocking other threads
                 sleep_time = 1.0 / self.fps - (time.perf_counter() - t0)
                 if sleep_time > 0:
-                    time.sleep(sleep_time)
+                    self._stop_event.wait(sleep_time)
             
             self.logger.info(f"Finished playing recording: {recording_name}")
             

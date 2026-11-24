@@ -50,6 +50,8 @@ class AnimationService:
         self._running.clear()
         if self._event_thread and self._event_thread.is_alive():
             self._event_thread.join(timeout=timeout)
+            if self._event_thread.is_alive():
+                raise RuntimeError("Animation worker has not stopped; serial port remains open")
         
         if self.robot:
             self.robot.disconnect()
@@ -216,5 +218,3 @@ class AnimationService:
         except Exception as e:
             print(f"Error loading recording {recording_name}: {e}")
             return None
-    
-    

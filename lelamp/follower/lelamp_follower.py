@@ -85,7 +85,7 @@ class LeLampFollower(Robot):
 
         return status
 
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self, calibrate: bool = True, *, calibration_only: bool = False) -> None:
         """
         We assume that at connection time, arm is in a rest position,
         and torque can be safely disabled to run calibration.
@@ -94,6 +94,12 @@ class LeLampFollower(Robot):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.bus.connect()
+        if calibration_only:
+            # Calibration must not enable torque or restore a stale goal.
+            return
+        if not calibrate and (not self.calibration or not self.is_calibrated):
+            self.bus.disconnect(disable_torque=False)
+            raise RuntimeError("Missing or mismatched follower calibration; run lelamp.calibrate --follower-only")
         if not self.is_calibrated and calibrate:
             logger.info(
                 "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
@@ -103,6 +109,10 @@ class LeLampFollower(Robot):
         for cam in self.cameras.values():
             cam.connect()
 
+        # Configure enables torque. Seed the present pose first to avoid a jump.
+        current = self.bus.sync_read("Present_Position")
+        self.bus.disable_torque(num_retry=3)
+        self.bus.sync_write("Goal_Position", current)
         self.configure()
         logger.info(f"{self} connected.")
 
@@ -150,15 +160,17 @@ class LeLampFollower(Robot):
         print("Calibration saved to", self.calibration_fpath)
 
     def configure(self) -> None:
-        with self.bus.torque_disabled():
-            self.bus.configure_motors()
-            for motor in self.bus.motors:
-                self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
-                # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
-                self.bus.write("P_Coefficient", motor, 16)
-                # Set I_Coefficient and D_Coefficient to default value 0 and 32
-                self.bus.write("I_Coefficient", motor, 0)
-                self.bus.write("D_Coefficient", motor, 32)
+        # Unlike torque_disabled(), do not re-enable torque in a finally block:
+        # failed configuration must leave the lamp unarmed, not restore torque.
+        self.bus.disable_torque(num_retry=3)
+        self.bus.configure_motors()
+        for motor in self.bus.motors:
+            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value, num_retry=3)
+            # Lower P reduces shakiness; use the original default I and D values.
+            self.bus.write("P_Coefficient", motor, 16, num_retry=3)
+            self.bus.write("I_Coefficient", motor, 0, num_retry=3)
+            self.bus.write("D_Coefficient", motor, 32, num_retry=3)
+        self.bus.enable_torque(num_retry=3)
 
     def setup_motors(self) -> None:
         for motor in reversed(self.bus.motors):
@@ -205,6 +217,9 @@ class LeLampFollower(Robot):
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        if not self.calibration:
+            raise RuntimeError("Cannot send actions without follower calibration")
 
         goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
 
